@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>雲端企業資料普查系統</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getFirestore, doc, setDoc, getDoc, collection, query, onSnapshot, getDocs, updateDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+
+        // ==========================================
+        // 【重要】請在此處填入你從 Firebase 複製的設定值
+        // ==========================================
+        const firebaseConfig = {
+          apiKey: "AIzaSyAPfPZ0ZQCOLjdhyHqTpyLT8TgT791nUn8",
+          authDomain: "contack-survey.firebaseapp.com",
+          projectId: "contack-survey",
+          storageBucket: "contack-survey.firebasestorage.app",
+          messagingSenderId: "60043053915",
+          appId: "1:60043053915:web:efc3624f8e9b9cb2cfa87e",
+          measurementId: "G-3EF8B9GJ0W"
+        };
+
+        // 初始化 Firebase 連線
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+        const appId = "survey-system-v1"; 
+
+        // 系統狀態
+        let rawData = [];
+        let userActions = {};
+        let currentUser = null;
+        let adminCreds = { user: "admin", pass: "8888" };
+        window.isAdminLoggedIn = false;
+
+        // 啟動身份驗證
+        async function startSystem() {
+            try {
+                await signInAnonymously(auth);
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        currentUser = user;
+                        await loadConfig();
+                        listenToData();
+                    }
+                });
+            } catch (err) {
+                console.error("Firebase 連線失敗:", err);
+            }
+        }
+        startSystem();
+
+        // 監聽雲端資料變動 (即時同步)
+        function listenToData() {
+            // 監聽原始清單
+            onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'raw_list'), (snap) => {
+                rawData = snap.docs.map(d => ({ ...d.data(), _rowId: d.id }));
+                if (window.isAdminLoggedIn) refreshAdminTable();
+            });
+
+            // 監聽使用者動作
+            onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'user_actions'), (snap) => {
+                snap.forEach(d => { userActions[d.id] = d.data(); });
+                if (window.isAdminLoggedIn) refreshAdminTable();
+            });
+        }
+
+        async function loadConfig() {
+            const configDoc = await getDoc(doc(db, 'artifacts', appId, 'admin', 'config'));
+            if (configDoc.exists()) adminCreds = configDoc.data();
+        }
+
+        // --- 視窗全域函式 ---
+        window.switchTab = (tab) => {
+            const sections = ['section-user', 'section-admin-login', 'section-admin'];
+            sections.forEach(s => document.getElementById(s).classList.add('hidden'));
+            
+            if (tab === 'user') {
+                document.getElementById('section-user').classList.remove('hidden');
+            } else {
+                if (window.isAdminLoggedIn) {
+                    document.getElementById('section-admin').classList.remove('hidden');
+                    refreshAdminTable();
+                } else {
+                    document.getElementById('section-admin-login').classList.remove('hidden');
+                }
+            }
+            document.getElementById('tab-user').className = tab === 'user' ? 'px-2 py-5 font-bold tab-active' : 'px-2 py-5 font-bold text-gray-400 hover:text-indigo-600';
+            document.getElementById('tab-admin').className = tab === 'admin' ? 'px-2 py-5 font-bold tab-active' : 'px-2 py-5 font-bold text-gray-400 hover:text-indigo-600';
+        };
+
+        window.userSearch = () => {
+            const taxId = document.getElementById('user-tax-id').value.trim();
+            const container = document.getElementById('user-result-container');
+            const submitArea = document.getElementById('final-submit-area');
+            container.innerHTML = '';
+            
+            const matches = rawData.filter(item => String(findTaxId(item)) === taxId);
+            if (matches.length === 0) {
+                submitArea.classList.add('hidden');
+                if(taxId) showModal('查無資料', '找不到此統編，請確認後再試。', 'error');
+                return;
+            }
+
+            matches.forEach((person, index) => {
+                const rowId = person._rowId;
+                const action = userActions[rowId];
+                const currentData = action ? action.data : person;
+                const card = document.createElement('div');
+                
+                let sText = action?.status === 'confirmed' ? '已確認' : (action?.status === 'modified' ? '已修改' : '待處理');
+                let sClass = action?.status === 'confirmed' ? 'status-confirmed' : (action?.status === 'modified' ? 'status-modified' : 'status-none');
+                let cClass = action?.status === 'confirmed' ? 'card-confirmed' : (action?.status === 'modified' ? 'card-modified' : 'bg-white');
+
+                card.className = `${cClass} rounded-2xl shadow-sm border-2 border-gray-100 overflow-hidden mb-6 transition-all`;
+                card.innerHTML = `
+                    <div class="p-5 border-b flex justify-between items-center">
+                        <div class="flex items-center gap-3"><span class="w-8 h-8 bg-indigo-600 text-white rounded-full flex items-center justify-center font-bold text-sm">${index + 1}</span><span class="font-bold text-gray-800">${findContactName(currentData)}</span></div>
+                        <span class="status-badge ${sClass}">${sText}</span>
+                    </div>
+                    <div class="p-0 overflow-x-auto">
+                        <table class="w-full text-sm">
+                            <tbody>
+                                ${Object.keys(person).filter(k => k !== '_rowId').map(key => `
+                                    <tr class="border-b last:border-0">
+                                        <td class="p-3 w-1/3 bg-gray-50/30 font-bold text-gray-400 border-r">${key}</td>
+                                        <td class="p-3 w-2/3">
+                                            <span id="view-${rowId}-${key}" class="${action && action.original?.[key] !== currentData[key] ? 'text-orange-600 font-bold' : 'text-gray-700'}">${currentData[key]}</span>
+                                            <input id="edit-${rowId}-${key}" type="text" value="${currentData[key]}" class="hidden w-full border border-indigo-200 rounded px-2 py-1">
+                                        </td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="p-4 bg-gray-50 flex justify-end gap-2">
+                        <button onclick="confirmRow('${rowId}')" class="px-4 py-2 bg-green-600 text-white rounded font-bold text-sm">確認正確</button>
+                        <button id="btn-edit-${rowId}" onclick="startEditRow('${rowId}')" class="px-4 py-2 bg-white border border-gray-300 text-gray-600 rounded text-sm">修改</button>
+                        <button id="btn-save-${rowId}" onclick="saveRow('${rowId}')" class="hidden px-4 py-2 bg-orange-600 text-white rounded font-bold text-sm">儲存修改</button>
+                    </div>
+                `;
+                container.appendChild(card);
+            });
+            submitArea.classList.remove('hidden');
+        };
+
+        window.confirmRow = async (rowId) => {
+            const original = rawData.find(r => r._rowId === rowId);
+            await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'user_actions', rowId), {
+                status: 'confirmed', data: original, original: original, timestamp: new Date().toISOString()
+            });
+            window.userSearch();
+        };
+
+        window.startEditRow = (rowId) => {
+            const original = rawData.find(r => r._rowId === rowId);
+            Object.keys(original).forEach(k => {
+                if(k === '_rowId') return;
+                document.getElementById(`view-${rowId}-${k}`).classList.add('hidden');
+                document.getElementById(`edit-${rowId}-${k}`).classList.remove('hidden');
+            });
+            document.getElementById(`btn-edit-${rowId}`).classList.add('hidden');
+            document.getElementById(`btn-save-${rowId}`).classList.remove('hidden');
+        };
+
+        window.saveRow = async (rowId) => {
+            const original = rawData.find(r => r._rowId === rowId);
+            const newData = {};
+            Object.keys(original).forEach(k => {
+                if(k === '_rowId') return;
+                newData[k] = document.getElementById(`edit-${rowId}-${k}`).value;
+            });
+            await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'user_actions', rowId), {
+                status: 'modified', data: newData, original: original, timestamp: new Date().toISOString()
+            });
+            window.userSearch();
+        };
+
+        window.finalSubmitCheck = () => {
+            const taxId = document.getElementById('user-tax-id').value.trim();
+            const matches = rawData.filter(item => String(findTaxId(item)) === taxId);
+            const uncompleted = matches.filter(item => !userActions[item._rowId]);
+            if (uncompleted.length > 0) {
+                showModal('尚未完成', `還有 ${uncompleted.length} 筆資料未處理，請確認後再提交。`, 'error');
+            } else {
+                showModal('查核完成', '感謝您的協助！資料已成功同步。', 'success');
+            }
+        };
+
+        window.attemptLogin = () => {
+            const u = document.getElementById('admin-user').value;
+            const p = document.getElementById('admin-pass').value;
+            if (u === adminCreds.user && p === adminCreds.pass) {
+                window.isAdminLoggedIn = true;
+                window.switchTab('admin');
+            } else {
+                showModal('錯誤', '帳密不正確', 'error');
+            }
+        };
+
+        window.handleFileUpload = async (e) => {
+            const file = e.target.files[0];
+            const reader = new FileReader();
+            reader.onload = async (evt) => {
+                const data = new Uint8Array(evt.target.result);
+                const workbook = XLSX.read(data, { type: 'array' });
+                const json = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
+                showModal('上傳中', '正在將資料寫入雲端，請稍候...', 'success');
+                for (let i = 0; i < json.length; i++) {
+                    const rowId = `row-${i}-${Date.now()}`;
+                    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'raw_list', rowId), json[i]);
+                }
+                showModal('完成', `導入 ${json.length} 筆資料`, 'success');
+            };
+            reader.readAsArrayBuffer(file);
+        };
+
+        window.updateAdminCredentials = async () => {
+            const newUser = document.getElementById('new-admin-user').value.trim();
+            const newPass = document.getElementById('new-admin-pass').value.trim();
+            if (!newUser || !newPass) return;
+            await setDoc(doc(db, 'artifacts', appId, 'admin', 'config'), { user: newUser, pass: newPass });
+            adminCreds = { user: newUser, pass: newPass };
+            showModal('成功', '新帳密已儲存至雲端', 'success');
+        };
+
+        function refreshAdminTable() {
+            const tbody = document.getElementById('admin-status-table');
+            const countSpan = document.getElementById('admin-count');
+            if(!tbody) return;
+            tbody.innerHTML = '';
+            const groups = {};
+            rawData.forEach(item => {
+                const tid = findTaxId(item);
+                if(!groups[tid]) groups[tid] = { name: findName(item), count: 0, completed: 0 };
+                groups[tid].count++;
+                if(userActions[item._rowId]) groups[tid].completed++;
+            });
+            Object.keys(groups).forEach(tid => {
+                const g = groups[tid];
+                const tr = document.createElement('tr');
+                let s = g.completed === 0 ? 'status-none' : (g.completed === g.count ? 'status-confirmed' : 'status-modified');
+                tr.innerHTML = `<td class="p-3 font-mono text-xs">${tid}</td><td class="p-3 text-xs">${g.name}</td><td class="p-3 text-center text-xs">${g.completed}/${g.count}</td><td class="p-3"><span class="status-badge ${s}">${g.completed === g.count ? '完成' : '處理中'}</span></td>`;
+                tbody.appendChild(tr);
+            });
+            countSpan.textContent = `共 ${Object.keys(groups).length} 家`;
+        }
+
+        function findTaxId(obj) { return obj[Object.keys(obj).find(k => k.includes('統一編號') || k.includes('統編'))]; }
+        function findName(obj) { return obj[Object.keys(obj).find(k => k.includes('名稱') || k.includes('公司'))]; }
+        function findContactName(obj) { return obj[Object.keys(obj).find(k => k.includes('聯絡人') || k.includes('姓名'))] || '聯絡窗口'; }
+        
+        window.closeModal = () => document.getElementById('custom-modal').classList.add('hidden');
+        function showModal(title, text, type) {
+            const m = document.getElementById('custom-modal');
+            document.getElementById('modal-title').textContent = title;
+            document.getElementById('modal-text').textContent = text;
+            document.getElementById('modal-icon').innerHTML = type === 'success' ? '✅' : '❌';
+            m.classList.remove('hidden');
+        }
+    </script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;700&display=swap');
+        body { font-family: 'Noto Sans TC', sans-serif; background-color: #f8fafc; }
+        .tab-active { border-bottom: 3px solid #4f46e5; color: #4f46e5; }
+        .status-badge { padding: 2px 8px; border-radius: 99px; font-size: 11px; font-weight: bold; }
+        .status-none { background: #fee2e2; color: #dc2626; }
+        .status-confirmed { background: #dcfce7; color: #166534; }
+        .status-modified { background: #fef9c3; color: #854d0e; }
+        .card-confirmed { background-color: #f0fdf4 !important; border-color: #bbf7d0 !important; }
+        .card-modified { background-color: #fffbeb !important; border-color: #fef08a !important; }
+    </style>
+</head>
+<body class="min-h-screen">
+    <nav class="bg-white shadow-sm sticky top-0 z-50">
+        <div class="max-w-6xl mx-auto px-4 flex justify-between items-center h-14">
+            <span class="font-bold text-indigo-700">雲端查核系統</span>
+            <div class="flex space-x-4">
+                <button onclick="switchTab('user')" id="tab-user" class="py-4 font-bold tab-active">資料查核</button>
+                <button onclick="switchTab('admin')" id="tab-admin" class="py-4 font-bold text-gray-400">後台管理</button>
+            </div>
+        </div>
+    </nav>
+
+    <main class="max-w-4xl mx-auto px-4 py-8">
+        <div id="section-user">
+            <div class="bg-white rounded-xl shadow-sm p-6 mb-6 text-center border">
+                <h2 class="text-xl font-bold mb-4">輸入公司統一編號</h2>
+                <div class="flex gap-2 max-w-sm mx-auto">
+                    <input type="text" id="user-tax-id" class="flex-1 border p-2 rounded-lg text-center font-mono text-lg">
+                    <button onclick="userSearch()" class="bg-indigo-600 text-white px-6 rounded-lg font-bold">查詢</button>
+                </div>
+            </div>
+            <div id="user-result-container"></div>
+            <div id="final-submit-area" class="hidden mt-8 text-center"><button onclick="finalSubmitCheck()" class="bg-indigo-600 text-white px-10 py-3 rounded-full font-bold shadow-lg">提交總確認</button></div>
+        </div>
+
+        <div id="section-admin-login" class="hidden max-w-xs mx-auto mt-10 p-6 bg-white rounded-xl shadow-lg border">
+            <h3 class="font-bold text-center mb-4">管理登入</h3>
+            <input type="text" id="admin-user" placeholder="帳號" class="w-full border p-2 rounded mb-3 text-sm outline-none">
+            <input type="password" id="admin-pass" placeholder="密碼" class="w-full border p-2 rounded mb-4 text-sm outline-none">
+            <button onclick="attemptLogin()" class="w-full bg-indigo-600 text-white py-2 rounded font-bold">登入</button>
+        </div>
+
+        <div id="section-admin" class="hidden">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div class="space-y-4">
+                    <div class="bg-white p-4 rounded-xl shadow border">
+                        <h3 class="font-bold text-sm mb-3">上傳原始 Excel</h3>
+                        <input type="file" id="up-in" class="hidden" onchange="handleFileUpload(event)">
+                        <button onclick="document.getElementById('up-in').click()" class="w-full bg-indigo-50 text-indigo-600 py-2 rounded font-bold text-sm">選擇檔案並上傳</button>
+                    </div>
+                    <div class="bg-white p-4 rounded-xl shadow border">
+                        <h3 class="font-bold text-sm mb-3">修改管理員帳密</h3>
+                        <input type="text" id="new-admin-user" placeholder="新帳號" class="w-full border p-2 rounded mb-2 text-xs">
+                        <input type="text" id="new-admin-pass" placeholder="新密碼" class="w-full border p-2 rounded mb-3 text-xs">
+                        <button onclick="updateAdminCredentials()" class="w-full bg-gray-800 text-white py-2 rounded text-xs font-bold">儲存更新</button>
+                    </div>
+                </div>
+                <div class="md:col-span-2 bg-white rounded-xl shadow border overflow-hidden">
+                    <div class="p-3 bg-gray-50 border-b flex justify-between"><span class="font-bold text-sm">即時進度表</span><span id="admin-count" class="text-xs text-indigo-600"></span></div>
+                    <table class="w-full text-left text-xs"><thead class="bg-gray-100 font-bold"><tr><th class="p-3">統編</th><th class="p-3">公司</th><th class="p-3 text-center">進度</th><th class="p-3">狀態</th></tr></thead><tbody id="admin-status-table" class="divide-y"></tbody></table>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <div id="custom-modal" class="fixed inset-0 bg-black/50 z-[100] hidden flex items-center justify-center p-4">
+        <div class="bg-white rounded-xl max-w-xs w-full p-6 text-center shadow-2xl">
+            <div id="modal-icon" class="text-3xl mb-2"></div>
+            <h3 id="modal-title" class="font-bold text-lg"></h3>
+            <p id="modal-text" class="text-gray-500 text-sm mb-6"></p>
+            <button onclick="closeModal()" class="w-full bg-indigo-600 text-white py-2 rounded font-bold">確定</button>
+        </div>
+    </div>
+</body>
+</html>
