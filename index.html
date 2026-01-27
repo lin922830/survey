@@ -3,43 +3,42 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>集團訓練發展聯絡人資料調查</title>
+    <title>集團聯絡窗口資訊確認</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getFirestore, doc, setDoc, getDoc, collection, query, onSnapshot, getDocs, updateDoc, deleteDoc, writeBatch } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, collection, query, onSnapshot, getDocs, updateDoc, deleteDoc, writeBatch, addDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 
-        // ==========================================
-        // 【重要】請在此處填入你從 Firebase 複製的設定值
-        // ==========================================
-        const firebaseConfig = {
-          apiKey: "AIzaSyAPfPZ0ZQCOLjdhyHqTpyLT8TgT791nUn8",
-          authDomain: "contack-survey.firebaseapp.com",
-          projectId: "contack-survey",
-          storageBucket: "contack-survey.firebasestorage.app",
-          messagingSenderId: "60043053915",
-          appId: "1:60043053915:web:efc3624f8e9b9cb2cfa87e",
-          measurementId: "G-3EF8B9GJ0W"
-        };
-
+        const firebaseConfig = JSON.parse(__firebase_config);
         const app = initializeApp(firebaseConfig);
         const db = getFirestore(app);
         const auth = getAuth(app);
-        const appId = "survey-system-v1"; 
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'survey-system-v1'; 
 
         let rawData = [];
         let userActions = {};
         let fieldOrder = []; 
         let currentUser = null;
         let adminCreds = { user: "admin", pass: "8888" };
+        
+        let pendingDeleteId = null;
+
         window.isAdminLoggedIn = false;
+        let adminFilterStatus = 'all';
+        let adminSortKey = 'taxId';
+        let adminSortOrder = 'asc';
 
         async function startSystem() {
             try {
-                await signInAnonymously(auth);
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+                
                 onAuthStateChanged(auth, async (user) => {
                     if (user) {
                         currentUser = user;
@@ -54,116 +53,275 @@
         startSystem();
 
         function listenToData() {
-            onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'raw_list'), (snap) => {
+            if (!currentUser) return;
+
+            const rawListRef = collection(db, 'artifacts', appId, 'public', 'data', 'raw_list');
+            onSnapshot(rawListRef, (snap) => {
                 rawData = snap.docs.map(d => ({ ...d.data(), _rowId: d.id }));
                 if (rawData.length > 0 && rawData[0]._fieldOrder) {
                     fieldOrder = rawData[0]._fieldOrder;
                 } else if (rawData.length > 0) {
                     fieldOrder = Object.keys(rawData[0]).filter(k => !k.startsWith('_'));
-                } else {
-                    fieldOrder = [];
                 }
+                const taxId = document.getElementById('user-tax-id')?.value.trim();
+                if (taxId) window.userSearch(true); 
                 if (window.isAdminLoggedIn) refreshAdminTable();
             });
 
-            onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'user_actions'), (snap) => {
-                userActions = {}; // 清空舊狀態
+            const actionsRef = collection(db, 'artifacts', appId, 'public', 'data', 'user_actions');
+            onSnapshot(actionsRef, (snap) => {
+                userActions = {};
                 snap.forEach(d => { userActions[d.id] = d.data(); });
+                const taxId = document.getElementById('user-tax-id')?.value.trim();
+                if (taxId) window.userSearch(true);
                 if (window.isAdminLoggedIn) refreshAdminTable();
             });
         }
 
         async function loadConfig() {
-            const configDoc = await getDoc(doc(db, 'artifacts', appId, 'admin', 'config'));
+            const configDoc = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'admin_config', 'settings'));
             if (configDoc.exists()) adminCreds = configDoc.data();
         }
 
-        window.switchTab = (tab) => {
-            const sections = ['section-user', 'section-admin-login', 'section-admin'];
-            sections.forEach(s => document.getElementById(s).classList.add('hidden'));
+        // --- 核心邏輯區 ---
+
+        window.requestDelete = (rowId) => {
+            if (!currentUser) return;
+            pendingDeleteId = rowId;
+            const modal = document.getElementById('delete-confirm-modal');
             
-            if (tab === 'user') {
-                document.getElementById('section-user').classList.remove('hidden');
+            const action = userActions[rowId];
+            const isNew = action?.status === 'new';
+            
+            const msgEl = document.getElementById('delete-msg-detail');
+            if (isNew) {
+                msgEl.textContent = "這是一筆新増的聯絡人，刪除後將直接從資料庫移除。";
             } else {
-                if (window.isAdminLoggedIn) {
-                    document.getElementById('section-admin').classList.remove('hidden');
-                    refreshAdminTable();
-                } else {
-                    document.getElementById('section-admin-login').classList.remove('hidden');
-                }
+                msgEl.textContent = "這是原始資料，刪除後將標記為「已刪除」並不再顯示。";
             }
-            document.getElementById('tab-user').className = tab === 'user' ? 'px-2 py-5 font-bold tab-active' : 'px-2 py-5 font-bold text-gray-400 hover:text-indigo-600';
-            document.getElementById('tab-admin').className = tab === 'admin' ? 'px-2 py-5 font-bold tab-active' : 'px-2 py-5 font-bold text-gray-400 hover:text-indigo-600';
+            
+            modal.classList.remove('hidden');
         };
 
-        window.userSearch = () => {
+        window.confirmDeleteAction = async () => {
+            if (!pendingDeleteId || !currentUser) return;
+            const rowId = pendingDeleteId;
+            const modal = document.getElementById('delete-confirm-modal');
+            
+            modal.classList.add('hidden');
+            showModal('處理中', '正在更新資料庫...', 'loading');
+
+            try {
+                const action = userActions[rowId];
+                
+                if (action?.status === 'new') {
+                    await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'user_actions', rowId));
+                    await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'raw_list', rowId));
+                    showModal('已刪除', '新增的聯絡人已完全移除。', 'success');
+                } else {
+                    const original = rawData.find(r => r._rowId === rowId) || {};
+                    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'user_actions', rowId), {
+                        status: 'deleted',
+                        data: original,
+                        original: original,
+                        timestamp: new Date().toISOString()
+                    });
+                    showModal('已標記', '該聯絡人已標記為刪除。', 'success');
+                }
+            } catch (err) {
+                console.error(err);
+                showModal('錯誤', '刪除失敗，請檢查網路。', 'error');
+            } finally {
+                pendingDeleteId = null;
+            }
+        };
+
+        window.closeDeleteModal = () => {
+            document.getElementById('delete-confirm-modal').classList.add('hidden');
+            pendingDeleteId = null;
+        };
+
+        window.userSearch = (isSilent = false) => {
             const taxId = document.getElementById('user-tax-id').value.trim();
             const container = document.getElementById('user-result-container');
             const submitArea = document.getElementById('final-submit-area');
-            container.innerHTML = '';
+            const addBtnArea = document.getElementById('add-contact-area');
             
-            const matches = rawData.filter(item => String(findTaxId(item)) === taxId);
-            if (matches.length === 0) {
+            const matches = rawData.filter(item => {
+                const isMatch = String(findTaxId(item)) === taxId;
+                const isDeleted = userActions[item._rowId]?.status === 'deleted';
+                return isMatch && !isDeleted;
+            });
+
+            const newContacts = Object.keys(userActions)
+                .filter(id => {
+                    const act = userActions[id];
+                    return act.status === 'new' && String(findTaxId(act.data)) === taxId;
+                })
+                .map(id => ({ ...userActions[id].data, _rowId: id }));
+
+            const finalDisplayList = [...matches];
+            newContacts.forEach(nc => {
+                if (!finalDisplayList.find(x => x._rowId === nc._rowId)) {
+                    finalDisplayList.push(nc);
+                }
+            });
+            
+            if (finalDisplayList.length === 0) {
+                container.innerHTML = '';
                 submitArea.classList.add('hidden');
-                if(taxId) showModal('查無資料', '找不到此統編，請確認後再試。', 'error');
+                addBtnArea.classList.add('hidden');
+                if(taxId && !isSilent) showModal('查無資料', '找不到此統編或該公司資料已被刪除。', 'error');
                 return;
             }
 
-            matches.forEach((person, index) => {
+            container.innerHTML = '';
+            finalDisplayList.forEach((person, index) => {
                 const rowId = person._rowId;
                 const action = userActions[rowId];
                 const currentData = action ? action.data : person;
                 const card = document.createElement('div');
                 
-                let sText = action?.status === 'confirmed' ? '已確認' : (action?.status === 'modified' ? '已修改' : '待處理');
-                let sClass = action?.status === 'confirmed' ? 'status-confirmed' : (action?.status === 'modified' ? 'status-modified' : 'status-none');
-                let cClass = action?.status === 'confirmed' ? 'card-confirmed' : (action?.status === 'modified' ? 'card-modified' : 'bg-white');
+                let sText = action?.status === 'confirmed' ? '已確認' : (action?.status === 'modified' ? '已修改' : (action?.status === 'new' ? '全新新增' : '待處理'));
+                let sClass = (action?.status === 'confirmed' || action?.status === 'new') ? 'status-confirmed' : (action?.status === 'modified' ? 'status-modified' : 'status-none');
+                let cClass = (action?.status === 'confirmed' || action?.status === 'new') ? 'card-confirmed' : (action?.status === 'modified' ? 'card-modified' : 'bg-white');
 
                 const displayKeys = fieldOrder.length > 0 ? fieldOrder : Object.keys(person).filter(k => !k.startsWith('_'));
 
-                card.className = `${cClass} rounded-2xl shadow-sm border-2 border-gray-100 overflow-hidden mb-6 transition-all`;
+                card.className = `${cClass} rounded-2xl shadow-sm border-2 border-orange-100 overflow-hidden mb-6 transition-all`;
                 card.innerHTML = `
-                    <div class="p-5 border-b flex justify-between items-center">
-                        <div class="flex items-center gap-3"><span class="w-8 h-8 bg-indigo-600 text-white rounded-full flex items-center justify-center font-bold text-sm">${index + 1}</span><span class="font-bold text-gray-800">${findContactName(currentData)}</span></div>
+                    <div class="p-5 border-b border-orange-100 flex justify-between items-center bg-orange-50/50">
+                        <div class="flex items-center gap-3">
+                            <span class="w-8 h-8 bg-orange-500 text-white rounded-full flex items-center justify-center font-bold text-sm shadow-sm">${index + 1}</span>
+                            <span class="font-bold text-stone-800 text-lg">${findContactName(currentData)}</span>
+                        </div>
                         <span class="status-badge ${sClass}">${sText}</span>
                     </div>
                     <div class="p-0 overflow-x-auto">
                         <table class="w-full text-sm">
                             <tbody>
                                 ${displayKeys.map(key => `
-                                    <tr class="border-b last:border-0">
-                                        <td class="p-3 w-1/3 bg-gray-50/30 font-bold text-gray-400 border-r">${key}</td>
+                                    <tr class="border-b border-orange-50 last:border-0 hover:bg-orange-50/30 transition-colors">
+                                        <td class="p-3 w-1/3 bg-orange-50/30 font-bold text-stone-500 border-r border-orange-100">${key}</td>
                                         <td class="p-3 w-2/3">
-                                            <span id="view-${rowId}-${key}" class="${action && action.original?.[key] !== currentData[key] ? 'text-orange-600 font-bold' : 'text-gray-700'}">${currentData[key] || ''}</span>
-                                            <input id="edit-${rowId}-${key}" type="text" value="${currentData[key] || ''}" class="hidden w-full border border-indigo-200 rounded px-2 py-1">
+                                            <span id="view-${rowId}-${key}" class="${action && action.original?.[key] !== currentData[key] ? 'text-orange-600 font-bold' : 'text-stone-700'}">${currentData[key] || ''}</span>
+                                            <input id="edit-${rowId}-${key}" type="text" value="${currentData[key] || ''}" class="hidden w-full border border-orange-200 rounded px-2 py-1 focus:ring-2 focus:ring-orange-300 outline-none">
                                         </td>
                                     </tr>
                                 `).join('')}
                             </tbody>
                         </table>
                     </div>
-                    <div class="p-4 bg-gray-50 flex justify-end gap-2">
-                        <button onclick="confirmRow('${rowId}')" class="px-4 py-2 bg-green-600 text-white rounded font-bold text-sm">確認正確</button>
-                        <button id="btn-edit-${rowId}" onclick="startEditRow('${rowId}')" class="px-4 py-2 bg-white border border-gray-300 text-gray-600 rounded text-sm">修改</button>
-                        <button id="btn-save-${rowId}" onclick="saveRow('${rowId}')" class="hidden px-4 py-2 bg-orange-600 text-white rounded font-bold text-sm">儲存修改</button>
+                    <div class="p-4 bg-orange-50/30 flex justify-between items-center border-t border-orange-100">
+                        <button onclick="window.requestDelete('${rowId}')" class="px-3 py-2 text-red-500 hover:bg-red-50 rounded-lg text-xs font-bold flex items-center gap-1 transition-colors">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                            刪除聯絡人
+                        </button>
+                        <div class="flex gap-2">
+                            <button onclick="window.confirmRow('${rowId}')" class="px-4 py-2 bg-green-600 text-white rounded font-bold text-sm shadow-md hover:bg-green-700 transition-colors">確認正確</button>
+                            <button id="btn-edit-${rowId}" onclick="window.startEditRow('${rowId}')" class="px-4 py-2 bg-white border border-orange-200 text-stone-600 rounded text-sm shadow-sm hover:bg-orange-50 transition-colors">修改</button>
+                            <button id="btn-save-${rowId}" onclick="window.saveRow('${rowId}')" class="hidden px-4 py-2 bg-orange-500 text-white rounded font-bold text-sm shadow-md hover:bg-orange-600 transition-colors">儲存修改</button>
+                        </div>
                     </div>
                 `;
                 container.appendChild(card);
             });
             submitArea.classList.remove('hidden');
+            addBtnArea.classList.remove('hidden');
+        };
+
+        window.openAddContact = () => {
+            const taxId = document.getElementById('user-tax-id').value.trim();
+            let companyBase = rawData.find(item => String(findTaxId(item)) === taxId && userActions[item._rowId]?.status !== 'deleted');
+            
+            if (!companyBase) {
+                const newOne = Object.values(userActions).find(a => a.status === 'new' && String(findTaxId(a.data)) === taxId);
+                if (newOne) companyBase = newOne.data;
+            }
+
+            if(!companyBase) {
+                showModal('無法新增', '找不到該公司的基礎資料，無法新增聯絡人。', 'error');
+                return;
+            }
+
+            const modal = document.getElementById('add-contact-modal');
+            const formContainer = document.getElementById('add-contact-form-container');
+            formContainer.innerHTML = '';
+
+            const keys = fieldOrder.length > 0 ? fieldOrder : Object.keys(companyBase).filter(k => !k.startsWith('_'));
+            
+            keys.forEach(key => {
+                const isFixedField = 
+                    key.includes('統一編號') || key.includes('統編') || 
+                    key.includes('名稱') || key.includes('公司') || 
+                    key.includes('地址') || key.includes('addr') || key.includes('居住地');
+                
+                const val = isFixedField ? (companyBase[key] || '') : '';
+                const div = document.createElement('div');
+                div.className = "mb-3";
+                div.innerHTML = `
+                    <label class="block text-xs font-bold text-stone-500 mb-1">${key}</label>
+                    <input type="text" data-key="${key}" value="${val}" ${isFixedField ? 'readonly class="w-full bg-orange-100 border-none p-2 rounded text-sm text-stone-500 font-bold cursor-not-allowed"' : 'class="w-full border border-orange-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-orange-400 bg-white" placeholder="請輸入..."'}>
+                `;
+                formContainer.appendChild(div);
+            });
+            modal.classList.remove('hidden');
+        };
+
+        window.submitNewContact = async () => {
+            if (!currentUser) return;
+            const inputs = document.querySelectorAll('#add-contact-form-container input');
+            const newData = {};
+            inputs.forEach(input => {
+                newData[input.getAttribute('data-key')] = input.value;
+            });
+
+            const rowId = `new-${Date.now()}`;
+            await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'raw_list', rowId), { ...newData, _fieldOrder: fieldOrder });
+            await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'user_actions', rowId), {
+                status: 'new', data: newData, original: {}, timestamp: new Date().toISOString()
+            });
+            
+            document.getElementById('add-contact-modal').classList.add('hidden');
+            showModal('新增成功', '已成功新增一筆聯絡資訊。', 'success');
+        };
+
+        window.saveRow = async (rowId) => {
+            if (!currentUser) return;
+            const action = userActions[rowId];
+            const original = rawData.find(r => r._rowId === rowId) || action?.original || {};
+            const newData = {};
+            
+            const inputs = document.querySelectorAll(`input[id^="edit-${rowId}-"]`);
+            inputs.forEach(input => {
+                const key = input.id.replace(`edit-${rowId}-`, '');
+                newData[key] = input.value;
+            });
+
+            const currentStatus = action?.status || 'none';
+            const newStatus = currentStatus === 'new' ? 'new' : 'modified';
+
+            await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'user_actions', rowId), {
+                status: newStatus, 
+                data: newData, 
+                original: original, 
+                timestamp: new Date().toISOString()
+            });
         };
 
         window.confirmRow = async (rowId) => {
-            const original = rawData.find(r => r._rowId === rowId);
+            if (!currentUser) return;
+            const item = rawData.find(r => r._rowId === rowId);
+            const original = item || userActions[rowId]?.data || {};
+            
             await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'user_actions', rowId), {
                 status: 'confirmed', data: original, original: original, timestamp: new Date().toISOString()
             });
-            window.userSearch();
         };
 
         window.startEditRow = (rowId) => {
-            const original = rawData.find(r => r._rowId === rowId);
-            const keys = fieldOrder.length > 0 ? fieldOrder : Object.keys(original).filter(k => !k.startsWith('_'));
+            const item = userActions[rowId]?.data || rawData.find(r => r._rowId === rowId);
+            const keys = fieldOrder.length > 0 ? fieldOrder : Object.keys(item).filter(k => !k.startsWith('_'));
             keys.forEach(k => {
                 const viewEl = document.getElementById(`view-${rowId}-${k}`);
                 const editEl = document.getElementById(`edit-${rowId}-${k}`);
@@ -174,29 +332,34 @@
             document.getElementById(`btn-save-${rowId}`).classList.remove('hidden');
         };
 
-        window.saveRow = async (rowId) => {
-            const original = rawData.find(r => r._rowId === rowId);
-            const newData = {};
-            const keys = fieldOrder.length > 0 ? fieldOrder : Object.keys(original).filter(k => !k.startsWith('_'));
-            keys.forEach(k => {
-                const editEl = document.getElementById(`edit-${rowId}-${k}`);
-                if(editEl) newData[k] = editEl.value;
-            });
-            await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'user_actions', rowId), {
-                status: 'modified', data: newData, original: original, timestamp: new Date().toISOString()
-            });
-            window.userSearch();
-        };
-
         window.finalSubmitCheck = () => {
             const taxId = document.getElementById('user-tax-id').value.trim();
-            const matches = rawData.filter(item => String(findTaxId(item)) === taxId);
-            const uncompleted = matches.filter(item => !userActions[item._rowId]);
-            if (uncompleted.length > 0) {
-                showModal('尚未完成', `還有 ${uncompleted.length} 筆資料未處理，請確認後再提交。`, 'error');
+            const matches = rawData.filter(item => String(findTaxId(item)) === taxId && userActions[item._rowId]?.status !== 'deleted');
+            const newOnes = Object.values(userActions).filter(a => a.status === 'new' && String(findTaxId(a.data)) === taxId);
+            const uncompletedRaw = matches.filter(item => !userActions[item._rowId]);
+            
+            if (uncompletedRaw.length > 0) {
+                showModal('尚未完成', `還有 ${uncompletedRaw.length} 筆原始資料未確認/修改，請先完成。`, 'error');
             } else {
-                showModal('查核完成', '感謝您的協助！資料已成功同步。', 'success');
+                showModal('查核完成', '感謝您的協助！資料已保存。', 'success', true);
             }
+        };
+
+        window.switchTab = (tab) => {
+            const sections = ['section-user', 'section-admin-login', 'section-admin'];
+            sections.forEach(s => document.getElementById(s).classList.add('hidden'));
+            if (tab === 'user') {
+                document.getElementById('section-user').classList.remove('hidden');
+            } else {
+                if (window.isAdminLoggedIn) {
+                    document.getElementById('section-admin').classList.remove('hidden');
+                    refreshAdminTable();
+                } else {
+                    document.getElementById('section-admin-login').classList.remove('hidden');
+                }
+            }
+            document.getElementById('tab-user').className = tab === 'user' ? 'px-4 py-2 font-bold text-orange-600 border-b-2 border-orange-500' : 'px-4 py-2 font-bold text-stone-400 hover:text-orange-500 transition-colors';
+            document.getElementById('tab-admin').className = tab === 'admin' ? 'px-4 py-2 font-bold text-orange-600 border-b-2 border-orange-500' : 'px-4 py-2 font-bold text-stone-400 hover:text-orange-500 transition-colors';
         };
 
         window.attemptLogin = () => {
@@ -206,43 +369,35 @@
                 window.isAdminLoggedIn = true;
                 window.switchTab('admin');
             } else {
-                showModal('錯誤', '帳密不正確', 'error');
+                showModal('錯誤', '帳號或密碼不正確', 'error');
             }
         };
 
-        // --- 清除資料邏輯 ---
         window.confirmClearData = () => {
-            const isSure = confirm("⚠️ 警告：這將會永久刪除雲端上所有的原始名單與回覆記錄！\n\n您確定要清空並重新上傳嗎？");
+            const isSure = window.confirm("⚠️ 這將刪除所有雲端資料，確定嗎？");
             if (isSure) clearAllData();
         };
 
         async function clearAllData() {
-            showModal('處理中', '正在清空雲端資料庫，請稍候...', 'success');
-            try {
-                // 批次刪除 raw_list
-                const rawSnap = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'raw_list'));
-                const actionSnap = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'user_actions'));
-                
-                const batch = writeBatch(db);
-                rawSnap.forEach(d => batch.delete(d.ref));
-                actionSnap.forEach(d => batch.delete(d.ref));
-                
-                await batch.commit();
-                showModal('已清空', '資料已成功全數清除，您現在可以上傳新的 Excel。', 'success');
-            } catch (err) {
-                showModal('錯誤', '清除失敗：' + err.message, 'error');
-            }
+            if (!currentUser) return;
+            showModal('處理中', '正在清空雲端資料庫...', 'loading');
+            const rawSnap = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'raw_list'));
+            const actionSnap = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'user_actions'));
+            const batch = writeBatch(db);
+            rawSnap.forEach(d => batch.delete(d.ref));
+            actionSnap.forEach(d => batch.delete(d.ref));
+            await batch.commit();
+            showModal('已清空', '資料已成功清除。', 'success');
         }
 
         window.handleFileUpload = async (e) => {
+            if (!currentUser) return;
             const file = e.target.files[0];
             const reader = new FileReader();
             reader.onload = async (evt) => {
                 const data = new Uint8Array(evt.target.result);
                 const workbook = XLSX.read(data, { type: 'array' });
-                const firstSheetName = workbook.SheetNames[0];
-                const worksheet = workbook.Sheets[firstSheetName];
-                
+                const worksheet = workbook.Sheets[workbook.SheetNames[0]];
                 const json = XLSX.utils.sheet_to_json(worksheet);
                 const range = XLSX.utils.decode_range(worksheet['!ref']);
                 const headers = [];
@@ -250,25 +405,74 @@
                     const address = XLSX.utils.encode_col(C) + "1";
                     if(worksheet[address]) headers.push(worksheet[address].v);
                 }
-                
-                showModal('上傳中', `正在導入 ${json.length} 筆資料...`, 'success');
+                showModal('上傳中', `正在導入 ${json.length} 筆資料...`, 'loading');
                 for (let i = 0; i < json.length; i++) {
                     const rowId = `row-${i}-${Date.now()}`;
-                    const rowDataWithOrder = { ...json[i], _fieldOrder: headers };
-                    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'raw_list', rowId), rowDataWithOrder);
+                    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'raw_list', rowId), { ...json[i], _fieldOrder: headers });
                 }
-                showModal('導入完成', `已成功將 ${json.length} 筆資料存入雲端。`, 'success');
+                showModal('導入完成', `已成功導入。`, 'success');
             };
             reader.readAsArrayBuffer(file);
         };
 
-        window.updateAdminCredentials = async () => {
-            const newUser = document.getElementById('new-admin-user').value.trim();
-            const newPass = document.getElementById('new-admin-pass').value.trim();
-            if (!newUser || !newPass) return;
-            await setDoc(doc(db, 'artifacts', appId, 'admin', 'config'), { user: newUser, pass: newPass });
-            adminCreds = { user: newUser, pass: newPass };
-            showModal('成功', '新帳密已儲存至雲端', 'success');
+        window.exportToExcel = () => {
+            const exportData = [];
+            
+            rawData.forEach(item => {
+                const action = userActions[item._rowId];
+                
+                let finalData = item;
+                let statusText = '未處理';
+
+                if (action) {
+                    if (action.status === 'deleted') {
+                        finalData = item; 
+                        statusText = '已刪除';
+                    } else if (action.status === 'confirmed') {
+                        finalData = action.data;
+                        statusText = '已確認';
+                    } else if (action.status === 'modified') {
+                        finalData = action.data;
+                        statusText = '已修改';
+                    }
+                }
+
+                const cleanRow = {};
+                fieldOrder.forEach(k => cleanRow[k] = finalData[k] || "");
+                cleanRow["處理狀態"] = statusText;
+                cleanRow["最後異動時間"] = action ? action.timestamp : "";
+                exportData.push(cleanRow);
+            });
+            
+            Object.values(userActions).forEach(action => {
+                if (action.status === 'new') {
+                    const cleanRow = {};
+                    fieldOrder.forEach(k => cleanRow[k] = action.data[k] || "");
+                    cleanRow["處理狀態"] = "全新新增";
+                    cleanRow["最後異動時間"] = action.timestamp;
+                    exportData.push(cleanRow);
+                }
+            });
+
+            const worksheet = XLSX.utils.json_to_sheet(exportData);
+            const workbook = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(workbook, worksheet, "查核結果");
+            XLSX.writeFile(workbook, `企業資料查核結果_${new Date().toISOString().split('T')[0]}.xlsx`);
+        };
+
+        window.setAdminFilter = (status) => {
+            adminFilterStatus = status;
+            refreshAdminTable();
+        };
+
+        window.setAdminSort = (key) => {
+            if (adminSortKey === key) {
+                adminSortOrder = adminSortOrder === 'asc' ? 'desc' : 'asc';
+            } else {
+                adminSortKey = key;
+                adminSortOrder = 'asc';
+            }
+            refreshAdminTable();
         };
 
         function refreshAdminTable() {
@@ -276,116 +480,263 @@
             const countSpan = document.getElementById('admin-count');
             if(!tbody) return;
             tbody.innerHTML = '';
-            const groups = {};
+            
+            const groupsMap = {};
             rawData.forEach(item => {
                 const tid = findTaxId(item);
-                if(!groups[tid]) groups[tid] = { name: findName(item), count: 0, completed: 0 };
-                groups[tid].count++;
-                if(userActions[item._rowId]) groups[tid].completed++;
+                if(!groupsMap[tid]) groupsMap[tid] = { taxId: tid, name: findName(item), count: 0, completed: 0 };
+                
+                const action = userActions[item._rowId];
+                if (action?.status === 'deleted') return;
+
+                groupsMap[tid].count++;
+                if(action) groupsMap[tid].completed++;
             });
-            Object.keys(groups).forEach(tid => {
-                const g = groups[tid];
+
+            Object.values(userActions).forEach(action => {
+                if (action.status === 'new') {
+                    const tid = findTaxId(action.data);
+                    if(!groupsMap[tid]) groupsMap[tid] = { taxId: tid, name: findName(action.data), count: 0, completed: 0 };
+                    groupsMap[tid].count++;
+                    groupsMap[tid].completed++;
+                }
+            });
+
+            let groups = Object.values(groupsMap);
+
+            if (adminFilterStatus === 'done') {
+                groups = groups.filter(g => g.completed === g.count && g.count > 0);
+            } else if (adminFilterStatus === 'pending') {
+                groups = groups.filter(g => g.completed < g.count);
+            }
+
+            groups.sort((a, b) => {
+                let valA = a[adminSortKey];
+                let valB = b[adminSortKey];
+                if (adminSortKey === 'progress') {
+                    valA = a.count === 0 ? 0 : a.completed / a.count;
+                    valB = b.count === 0 ? 0 : b.completed / b.count;
+                }
+                if (valA < valB) return adminSortOrder === 'asc' ? -1 : 1;
+                if (valA > valB) return adminSortOrder === 'asc' ? 1 : -1;
+                return 0;
+            });
+
+            groups.forEach(g => {
                 const tr = document.createElement('tr');
                 let s = g.completed === 0 ? 'status-none' : (g.completed === g.count ? 'status-confirmed' : 'status-modified');
-                tr.innerHTML = `<td class="p-3 font-mono text-xs">${tid}</td><td class="p-3 text-xs">${g.name}</td><td class="p-3 text-center text-xs">${g.completed}/${g.count}</td><td class="p-3"><span class="status-badge ${s}">${g.completed === g.count ? '完成' : '處理中'}</span></td>`;
+                tr.innerHTML = `
+                    <td class="p-3 font-mono text-xs text-stone-700">${g.taxId}</td>
+                    <td class="p-3 text-xs text-stone-800">${g.name}</td>
+                    <td class="p-3 text-center text-xs font-bold text-orange-600">${g.completed}/${g.count}</td>
+                    <td class="p-3"><span class="status-badge ${s}">${g.completed === g.count ? '完成' : '處理中'}</span></td>
+                `;
                 tbody.appendChild(tr);
             });
-            countSpan.textContent = `共 ${Object.keys(groups).length} 家`;
+            countSpan.textContent = `篩選後共 ${groups.length} 家廠商`;
         }
 
-        function findTaxId(obj) { return obj[Object.keys(obj).find(k => k.includes('統一編號') || k.includes('統編'))]; }
-        function findName(obj) { return obj[Object.keys(obj).find(k => k.includes('名稱') || k.includes('公司'))]; }
+        window.updateAdminCredentials = async () => {
+            if (!currentUser) return;
+            const newUser = document.getElementById('new-admin-user').value.trim();
+            const newPass = document.getElementById('new-admin-pass').value.trim();
+            if (!newUser || !newPass) return;
+            await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'admin_config', 'settings'), { user: newUser, pass: newPass });
+            adminCreds = { user: newUser, pass: newPass };
+            showModal('成功', '管理員帳密已更新', 'success');
+        };
+
+        function findTaxId(obj) { return obj[Object.keys(obj).find(k => k.includes('統一編號') || k.includes('統編'))] || ''; }
+        function findName(obj) { return obj[Object.keys(obj).find(k => k.includes('名稱') || k.includes('公司'))] || ''; }
         function findContactName(obj) { return obj[Object.keys(obj).find(k => k.includes('聯絡人') || k.includes('姓名'))] || '聯絡窗口'; }
         
-        window.closeModal = () => document.getElementById('custom-modal').classList.add('hidden');
-        function showModal(title, text, type) {
+        window.closeModal = () => {
             const m = document.getElementById('custom-modal');
+            if (m.dataset.shouldClose === "true") {
+                document.body.innerHTML = "<div class='flex flex-col items-center justify-center min-h-screen font-bold text-orange-800 bg-orange-50 p-6 text-center text-xl'><span>✅ 查核完成，資料已成功提交！</span><span class='text-sm mt-4 text-stone-500'>您現在可以安全地關閉此視窗。</span></div>";
+            }
+            m.classList.add('hidden');
+        };
+        window.closeAddModal = () => document.getElementById('add-contact-modal').classList.add('hidden');
+        
+        function showModal(title, text, type, shouldClose = false) {
+            const m = document.getElementById('custom-modal');
+            m.dataset.shouldClose = shouldClose;
             document.getElementById('modal-title').textContent = title;
             document.getElementById('modal-text').textContent = text;
-            document.getElementById('modal-icon').innerHTML = type === 'success' ? '✅' : '❌';
+            const iconEl = document.getElementById('modal-icon');
+            
+            if (type === 'loading') {
+                iconEl.innerHTML = '<span class="animate-spin inline-block w-8 h-8 border-4 border-orange-500 border-t-transparent rounded-full"></span>';
+            } else if (type === 'success') {
+                iconEl.innerHTML = '✅';
+            } else {
+                iconEl.innerHTML = '❌';
+            }
             m.classList.remove('hidden');
         }
     </script>
 
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;700&display=swap');
-        body { font-family: 'Noto Sans TC', sans-serif; background-color: #f8fafc; }
-        .tab-active { border-bottom: 3px solid #4f46e5; color: #4f46e5; }
+        body { font-family: 'Noto Sans TC', sans-serif; background-color: #fff7ed; /* orange-50 */ }
         .status-badge { padding: 2px 8px; border-radius: 99px; font-size: 11px; font-weight: bold; }
-        .status-none { background: #fee2e2; color: #dc2626; }
-        .status-confirmed { background: #dcfce7; color: #166534; }
-        .status-modified { background: #fef9c3; color: #854d0e; }
+        .status-none { background: #fed7aa; color: #9a3412; } /* orange-200, orange-800 */
+        .status-confirmed { background: #bbf7d0; color: #166534; } /* green-200, green-800 */
+        .status-modified { background: #fde047; color: #854d0e; } /* yellow-300, yellow-800 */
         .card-confirmed { background-color: #f0fdf4 !important; border-color: #bbf7d0 !important; }
-        .card-modified { background-color: #fffbeb !important; border-color: #fef08a !important; }
+        .card-modified { background-color: #fefce8 !important; border-color: #fde047 !important; }
+        th.sortable { cursor: pointer; user-select: none; }
+        th.sortable:hover { background-color: #fed7aa; }
     </style>
 </head>
-<body class="min-h-screen">
-    <nav class="bg-white shadow-sm sticky top-0 z-50">
-        <div class="max-w-6xl mx-auto px-4 flex justify-between items-center h-14">
-            <span class="font-bold text-indigo-700">雲端查核系統</span>
-            <div class="flex space-x-4">
-                <button onclick="switchTab('user')" id="tab-user" class="py-4 font-bold tab-active">資料查核</button>
-                <button onclick="switchTab('admin')" id="tab-admin" class="py-4 font-bold text-gray-400">後台管理</button>
+<body class="min-h-screen pb-20 text-stone-800">
+    <nav class="bg-white/80 backdrop-blur-md shadow-sm sticky top-0 z-50 border-b border-orange-100">
+        <div class="max-w-6xl mx-auto px-4 h-24 flex items-center justify-between relative">
+            <div class="w-1/4"></div> <!-- Spacer for centering -->
+            <div class="flex-1 text-center">
+                <h1 class="font-bold text-3xl text-orange-900 tracking-wider">集團聯絡窗口資訊確認</h1>
+            </div>
+            <div class="w-1/4 flex justify-end space-x-2">
+                <button onclick="switchTab('user')" id="tab-user" class="px-4 py-2 font-bold text-orange-600 border-b-2 border-orange-500 transition-colors">資料查核</button>
+                <button onclick="switchTab('admin')" id="tab-admin" class="px-4 py-2 font-bold text-stone-400 hover:text-orange-500 transition-colors">後台管理</button>
             </div>
         </div>
     </nav>
 
-    <main class="max-w-4xl mx-auto px-4 py-8">
+    <main class="max-w-4xl mx-auto px-4 py-12">
+        <!-- 使用者介面 -->
         <div id="section-user">
-            <div class="bg-white rounded-xl shadow-sm p-6 mb-6 text-center border">
-                <h2 class="text-xl font-bold mb-4">輸入公司統一編號</h2>
-                <div class="flex gap-2 max-w-sm mx-auto">
-                    <input type="text" id="user-tax-id" class="flex-1 border p-2 rounded-lg text-center font-mono text-lg" placeholder="請輸入8位統編">
-                    <button onclick="userSearch()" class="bg-indigo-600 text-white px-6 rounded-lg font-bold">查詢</button>
+            <div class="bg-white rounded-2xl shadow-lg shadow-orange-100/50 p-10 mb-8 text-center border border-orange-100">
+                <h2 class="text-2xl font-bold mb-4 text-stone-700">請輸入公司統一編號</h2>
+                <div class="flex gap-3 max-w-md mx-auto">
+                    <input type="text" id="user-tax-id" class="flex-1 border-2 border-orange-100 p-3 rounded-xl text-center font-mono text-xl outline-none focus:border-orange-400 focus:ring-4 focus:ring-orange-100 transition-all placeholder-stone-300" placeholder="請輸入8位統編">
+                    <button onclick="userSearch()" class="bg-orange-500 hover:bg-orange-600 text-white px-8 rounded-xl font-bold shadow-md shadow-orange-200 transition-transform active:scale-95">查詢</button>
                 </div>
             </div>
+            
             <div id="user-result-container"></div>
-            <div id="final-submit-area" class="hidden mt-8 text-center"><button onclick="finalSubmitCheck()" class="bg-indigo-600 text-white px-10 py-3 rounded-full font-bold shadow-lg">提交總確認</button></div>
+            
+            <div id="add-contact-area" class="hidden text-center mb-10">
+                <button onclick="openAddContact()" class="bg-white border-2 border-dashed border-orange-300 text-orange-600 px-8 py-4 rounded-2xl font-bold transition-all hover:bg-orange-50 hover:border-orange-400 shadow-sm">
+                    + 新增該公司其他聯絡窗口
+                </button>
+            </div>
+
+            <div id="final-submit-area" class="hidden text-center">
+                <button onclick="finalSubmitCheck()" class="bg-gradient-to-r from-orange-500 to-amber-500 text-white px-12 py-4 rounded-full font-bold shadow-xl shadow-orange-200 transition-all hover:scale-105 active:scale-95 text-lg">提交總確認</button>
+            </div>
         </div>
 
-        <div id="section-admin-login" class="hidden max-w-xs mx-auto mt-10 p-6 bg-white rounded-xl shadow-lg border">
-            <h3 class="font-bold text-center mb-4">管理登入</h3>
-            <input type="text" id="admin-user" placeholder="帳號" class="w-full border p-2 rounded mb-3 text-sm outline-none">
-            <input type="password" id="admin-pass" placeholder="密碼" class="w-full border p-2 rounded mb-4 text-sm outline-none">
-            <button onclick="attemptLogin()" class="w-full bg-indigo-600 text-white py-2 rounded font-bold">登入</button>
+        <!-- 管理登入 -->
+        <div id="section-admin-login" class="hidden max-w-sm mx-auto mt-16 p-8 bg-white rounded-2xl shadow-xl border border-orange-100">
+            <h3 class="font-bold text-center mb-6 text-xl text-stone-700">管理人員登入</h3>
+            <input type="text" id="admin-user" placeholder="帳號" class="w-full border border-stone-200 p-3 rounded-lg mb-4 outline-none focus:border-orange-400 focus:ring-2 focus:ring-orange-100 transition-all">
+            <input type="password" id="admin-pass" placeholder="密碼" class="w-full border border-stone-200 p-3 rounded-lg mb-6 outline-none focus:border-orange-400 focus:ring-2 focus:ring-orange-100 transition-all">
+            <button onclick="attemptLogin()" class="w-full bg-stone-800 text-white py-3 rounded-lg font-bold hover:bg-black transition-colors">登入系統</button>
         </div>
 
+        <!-- 管理後台 -->
         <div id="section-admin" class="hidden">
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-                <div class="space-y-4">
-                    <div class="bg-white p-4 rounded-xl shadow border">
-                        <h3 class="font-bold text-sm mb-3 text-gray-700">更新名單資料</h3>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+                <div class="space-y-6">
+                    <div class="bg-white p-6 rounded-2xl shadow-sm border border-orange-100">
+                        <h3 class="font-bold text-lg mb-4 text-stone-700 border-b border-orange-100 pb-2">數據處理中心</h3>
                         <input type="file" id="up-in" class="hidden" onchange="handleFileUpload(event)">
-                        <button onclick="document.getElementById('up-in').click()" class="w-full bg-indigo-600 text-white py-2 rounded font-bold text-sm mb-3">1. 上傳新 Excel</button>
-                        <hr class="mb-3">
-                        <button onclick="confirmClearData()" class="w-full bg-red-50 text-red-600 border border-red-200 py-2 rounded font-bold text-xs hover:bg-red-100">清除雲端舊資料</button>
-                        <p class="text-[10px] text-gray-400 mt-2">* 更換名單前，建議先清除舊資料避免混雜。</p>
+                        <button onclick="document.getElementById('up-in').click()" class="w-full bg-orange-50 text-orange-700 border border-orange-200 py-3 rounded-xl font-bold text-sm mb-3 hover:bg-orange-100 transition-colors">1. 上傳原始 Excel</button>
+                        <button onclick="exportToExcel()" class="w-full bg-green-50 text-green-700 border border-green-200 py-3 rounded-xl font-bold text-sm mb-6 hover:bg-green-100 transition-colors">2. 匯出完整 Excel</button>
+                        
+                        <div class="pt-4 border-t border-dashed border-stone-200">
+                            <button onclick="confirmClearData()" class="w-full text-red-500 text-xs font-bold hover:text-red-700 hover:underline">⚠️ 清空雲端所有資料 (慎用)</button>
+                        </div>
                     </div>
-                    <div class="bg-white p-4 rounded-xl shadow border">
-                        <h3 class="font-bold text-sm mb-3 text-gray-700">修改管理員帳密</h3>
-                        <input type="text" id="new-admin-user" placeholder="新帳號" class="w-full border p-2 rounded mb-2 text-xs">
-                        <input type="text" id="new-admin-pass" placeholder="新密碼" class="w-full border p-2 rounded mb-3 text-xs">
-                        <button onclick="updateAdminCredentials()" class="w-full bg-gray-800 text-white py-2 rounded text-xs font-bold">儲存更新</button>
+                    
+                    <div class="bg-white p-6 rounded-2xl shadow-sm border border-orange-100">
+                        <h3 class="font-bold text-sm mb-3 text-stone-500 uppercase">管理員設定</h3>
+                        <input type="text" id="new-admin-user" placeholder="新帳號" class="w-full bg-stone-50 border-none p-2 rounded mb-2 text-sm outline-none focus:ring-1 focus:ring-orange-300">
+                        <input type="text" id="new-admin-pass" placeholder="新密碼" class="w-full bg-stone-50 border-none p-2 rounded mb-3 text-sm outline-none focus:ring-1 focus:ring-orange-300">
+                        <button onclick="updateAdminCredentials()" class="w-full bg-stone-600 text-white py-2 rounded-lg text-xs font-bold hover:bg-stone-800 transition-colors">更新權限</button>
                     </div>
                 </div>
-                <div class="md:col-span-2 bg-white rounded-xl shadow border overflow-hidden">
-                    <div class="p-3 bg-gray-50 border-b flex justify-between"><span class="font-bold text-sm">即時查核進度</span><span id="admin-count" class="text-xs text-indigo-600"></span></div>
-                    <div class="max-h-[500px] overflow-y-auto">
-                        <table class="w-full text-left text-xs"><thead class="bg-gray-100 font-bold sticky top-0"><tr><th class="p-3">統編</th><th class="p-3">公司</th><th class="p-3 text-center">進度</th><th class="p-3">狀態</th></tr></thead><tbody id="admin-status-table" class="divide-y"></tbody></table>
+                
+                <div class="md:col-span-2 bg-white rounded-2xl shadow-sm border border-orange-100 overflow-hidden flex flex-col h-[600px]">
+                    <div class="p-4 bg-orange-50 border-b border-orange-100 flex flex-wrap justify-between items-center gap-3">
+                        <div class="flex items-center gap-3">
+                            <span class="font-bold text-stone-700">即時查核概況</span>
+                            <select onchange="setAdminFilter(this.value)" class="text-xs border-none bg-white py-1 px-3 rounded-full shadow-sm text-stone-600 focus:ring-2 focus:ring-orange-200 outline-none cursor-pointer">
+                                <option value="all">顯示所有狀態</option>
+                                <option value="pending">僅顯示未完成</option>
+                                <option value="done">僅顯示已完成</option>
+                            </select>
+                        </div>
+                        <span id="admin-count" class="text-xs font-bold text-orange-600 bg-white px-3 py-1 rounded-full shadow-sm">統計中...</span>
+                    </div>
+                    <div class="flex-1 overflow-y-auto">
+                        <table class="w-full text-left text-sm">
+                            <thead class="bg-white text-stone-400 text-xs font-bold uppercase tracking-wider sticky top-0 z-10 shadow-sm">
+                                <tr>
+                                    <th class="p-4 sortable hover:text-orange-500 transition-colors" onclick="setAdminSort('taxId')">統編 ↕️</th>
+                                    <th class="p-4 sortable hover:text-orange-500 transition-colors" onclick="setAdminSort('name')">公司名稱 ↕️</th>
+                                    <th class="p-4 text-center sortable hover:text-orange-500 transition-colors" onclick="setAdminSort('progress')">進度 ↕️</th>
+                                    <th class="p-4">狀態</th>
+                                </tr>
+                            </thead>
+                            <tbody id="admin-status-table" class="divide-y divide-orange-50"></tbody>
+                        </table>
                     </div>
                 </div>
             </div>
         </div>
     </main>
 
-    <div id="custom-modal" class="fixed inset-0 bg-black/50 z-[100] hidden flex items-center justify-center p-4">
-        <div class="bg-white rounded-xl max-w-xs w-full p-6 text-center shadow-2xl">
-            <div id="modal-icon" class="text-3xl mb-2"></div>
-            <h3 id="modal-title" class="font-bold text-lg"></h3>
-            <p id="modal-text" class="text-gray-500 text-sm mb-6"></p>
-            <button onclick="closeModal()" class="w-full bg-indigo-600 text-white py-2 rounded font-bold">確定</button>
+    <!-- 自定義刪除確認視窗 -->
+    <div id="delete-confirm-modal" class="fixed inset-0 bg-stone-800/40 z-[200] hidden flex items-center justify-center p-4 backdrop-blur-sm">
+        <div class="bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl scale-100 animate-in fade-in zoom-in duration-200">
+            <div class="text-center">
+                <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-red-50 mb-4">
+                    <svg class="h-6 w-6 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                    </svg>
+                </div>
+                <h3 class="text-lg leading-6 font-bold text-stone-800" id="modal-title">確定要刪除嗎？</h3>
+                <div class="mt-2">
+                    <p class="text-sm text-stone-500" id="delete-msg-detail">此操作無法復原。</p>
+                </div>
+            </div>
+            <div class="mt-6 grid grid-cols-2 gap-3">
+                <button onclick="window.closeDeleteModal()" type="button" class="w-full inline-flex justify-center rounded-xl border border-stone-200 shadow-sm px-4 py-2 bg-white text-base font-bold text-stone-600 hover:bg-stone-50 focus:outline-none sm:text-sm transition-colors">
+                    取消
+                </button>
+                <button onclick="window.confirmDeleteAction()" type="button" class="w-full inline-flex justify-center rounded-xl border border-transparent shadow-sm px-4 py-2 bg-red-500 text-base font-bold text-white hover:bg-red-600 focus:outline-none sm:text-sm transition-colors">
+                    確認刪除
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 新增聯絡人視窗 -->
+    <div id="add-contact-modal" class="fixed inset-0 bg-stone-800/40 z-[101] hidden flex items-center justify-center p-4 backdrop-blur-sm">
+        <div class="bg-white rounded-3xl max-w-md w-full p-8 shadow-2xl flex flex-col max-h-[85vh]">
+            <div class="flex justify-between items-center mb-6">
+                <h3 class="font-bold text-xl text-orange-800">新增聯絡窗口</h3>
+                <button onclick="closeAddModal()" class="w-8 h-8 rounded-full bg-stone-100 text-stone-400 flex items-center justify-center hover:bg-stone-200 transition-colors">✕</button>
+            </div>
+            <div id="add-contact-form-container" class="overflow-y-auto flex-1 pr-2 space-y-4"></div>
+            <div class="grid grid-cols-2 gap-4 mt-8">
+                <button onclick="closeAddModal()" class="py-3 border border-stone-200 rounded-xl font-bold text-stone-500 hover:bg-stone-50 transition-colors">取消</button>
+                <button onclick="submitNewContact()" class="py-3 bg-orange-500 text-white rounded-xl font-bold shadow-lg shadow-orange-200 hover:bg-orange-600 transition-colors">確認並儲存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 一般提示視窗 -->
+    <div id="custom-modal" class="fixed inset-0 bg-stone-800/40 z-[100] hidden flex items-center justify-center p-4 backdrop-blur-sm">
+        <div class="bg-white rounded-2xl max-w-xs w-full p-6 text-center shadow-2xl scale-100 animate-in fade-in zoom-in duration-200">
+            <div id="modal-icon" class="text-4xl mb-4"></div>
+            <h3 id="modal-title" class="font-bold text-lg text-stone-800 mb-2"></h3>
+            <p id="modal-text" class="text-stone-500 text-sm mb-6 leading-relaxed"></p>
+            <button onclick="closeModal()" class="w-full bg-stone-800 text-white py-3 rounded-xl font-bold shadow-md hover:bg-black transition-colors">確定</button>
         </div>
     </div>
 </body>
 </html>
-
