@@ -15,15 +15,15 @@
         // ==========================================
         // ⚠️ 重要：Firebase 設定
         // ==========================================
-const firebaseConfig = {
-  apiKey: "AIzaSyAPfPZ0ZQCOLjdhyHqTpyLT8TgT791nUn8",
-  authDomain: "contack-survey.firebaseapp.com",
-  projectId: "contack-survey",
-  storageBucket: "contack-survey.firebasestorage.app",
-  messagingSenderId: "60043053915",
-  appId: "1:60043053915:web:efc3624f8e9b9cb2cfa87e",
-  measurementId: "G-3EF8B9GJ0W"
-};
+        const myFirebaseConfig = {
+             apiKey: "AIzaSyAPfPZ0ZQCOLjdhyHqTpyLT8TgT791nUn8",
+             authDomain: "contack-survey.firebaseapp.com",
+             projectId: "contack-survey",
+             storageBucket: "contack-survey.firebasestorage.app",
+             messagingSenderId: "60043053915",
+             appId: "1:60043053915:web:efc3624f8e9b9cb2cfa87e",
+            measurementId: "G-3EF8B9GJ0W"
+        };
         // ==========================================
 
         let rawData = [];
@@ -40,7 +40,9 @@ const firebaseConfig = {
         async function startSystem() {
             try {
                 const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : myFirebaseConfig;
-                appId = typeof __app_id !== 'undefined' ? __app_id : "group-survey-app"; 
+                
+                // 修正處：根據您的 Firebase 實際路徑調整 appId
+                appId = typeof __app_id !== 'undefined' ? __app_id : "survey-system-v1"; 
 
                 if (!firebaseConfig.apiKey) {
                     console.error("Firebase 未配置");
@@ -58,7 +60,7 @@ const firebaseConfig = {
                         await signInAnonymously(auth);
                     }
                 };
-                initAuth();
+                await initAuth();
 
                 onAuthStateChanged(auth, async (user) => {
                     if (user) {
@@ -73,10 +75,14 @@ const firebaseConfig = {
         async function loadConfig() {
             if (!currentUser) return;
             try {
+                // 指向正確的配置路徑
                 const configRef = doc(db, 'artifacts', appId, 'public', 'data', 'admin_config', 'settings');
                 const configDoc = await getDoc(configRef);
                 if (configDoc.exists()) {
                     adminCreds = configDoc.data();
+                    console.log("管理員配置已從雲端更新");
+                } else {
+                    console.log("未找到雲端配置，使用預設帳密");
                 }
             } catch(e) { console.error("Config Load Error:", e); }
         }
@@ -90,13 +96,13 @@ const firebaseConfig = {
                     fieldOrder = rawData[0]._fieldOrder || Object.keys(rawData[0]).filter(k => !k.startsWith('_'));
                 }
                 updateUIOnDataChange();
-            });
+            }, (err) => console.error("Listen raw_list error:", err));
 
             onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'user_actions'), (snap) => {
                 userActions = {};
                 snap.forEach(d => { userActions[d.id] = d.data(); });
                 updateUIOnDataChange();
-            });
+            }, (err) => console.error("Listen user_actions error:", err));
         }
 
         function updateUIOnDataChange() {
@@ -117,8 +123,16 @@ const firebaseConfig = {
                     document.getElementById('section-admin-login').classList.remove('hidden');
                 }
             }
-            document.getElementById('tab-user').className = tab === 'user' ? 'px-4 py-2 font-bold text-orange-600 border-b-2 border-orange-500' : 'px-4 py-2 font-bold text-stone-400 hover:text-orange-500';
-            document.getElementById('tab-admin').className = tab === 'admin' ? 'px-4 py-2 font-bold text-orange-600 border-b-2 border-orange-500' : 'px-4 py-2 font-bold text-stone-400 hover:text-orange-500';
+            // 更新按鈕樣式
+            const userBtn = document.getElementById('tab-user');
+            const adminBtn = document.getElementById('tab-admin');
+            if (tab === 'user') {
+                userBtn.className = 'px-6 py-2 rounded-lg font-bold text-orange-600 bg-white shadow-sm transition-all';
+                adminBtn.className = 'px-6 py-2 rounded-lg font-bold text-stone-400 hover:text-orange-500 transition-all';
+            } else {
+                adminBtn.className = 'px-6 py-2 rounded-lg font-bold text-orange-600 bg-white shadow-sm transition-all';
+                userBtn.className = 'px-6 py-2 rounded-lg font-bold text-stone-400 hover:text-orange-500 transition-all';
+            }
         };
 
         window.userSearch = (isSilent = false) => {
@@ -156,7 +170,6 @@ const firebaseConfig = {
                 
                 let sText = '待處理';
                 if (action?.status === 'confirmed') {
-                    // 檢查資料是否有被修改過，顯示不同的標籤
                     const isModified = action.status === 'modified' || (action.original && JSON.stringify(action.data) !== JSON.stringify(action.original));
                     sText = isModified ? '已修改' : '已確認';
                 }
@@ -210,7 +223,6 @@ const firebaseConfig = {
 
         window.openAddContact = () => {
             const taxId = document.getElementById('user-tax-id').value.trim();
-            // 尋找基準資料來抓取公司名稱和地址
             let base = rawData.find(item => String(findTaxId(item)) === taxId && userActions[item._rowId]?.status !== 'deleted');
             if (!base) {
                 const anyNew = Object.values(userActions).find(a => a.status !== 'deleted' && String(findTaxId(a.data)) === taxId);
@@ -224,7 +236,6 @@ const firebaseConfig = {
             const keys = [...new Set([...fieldOrder, ...Object.keys(base)])].filter(k => !k.startsWith('_') && k !== 'undefined');
             
             keys.forEach(key => {
-                // 自動帶入邏輯：只要欄位名稱包含 統編、名稱、地址 相關字眼，即自動帶入且唯讀
                 const isAutoFill = key.includes('統一編號') || key.includes('統編') || key.includes('名稱') || key.includes('公司') || key.includes('地址');
                 const val = isAutoFill ? (base[key] || '') : '';
                 
@@ -272,7 +283,6 @@ const firebaseConfig = {
                 timestamp: new Date().toLocaleString()
             });
             
-            // 儲存後切換回檢視模式
             Object.keys(newData).forEach(k => {
                 const viewEl = document.getElementById(`view-${rowId}-${k}`);
                 const editEl = document.getElementById(`edit-${rowId}-${k}`);
@@ -286,7 +296,6 @@ const firebaseConfig = {
         window.confirmRow = async (rowId) => {
             if (!currentUser) return;
             
-            // 檢核：如果該列的編輯框是顯示狀態，代表使用者修改了但沒存
             const firstEditInput = document.querySelector(`input[id^="edit-${rowId}-"]`);
             if (firstEditInput && !firstEditInput.classList.contains('hidden')) {
                 window.showModal('請先儲存', '您已進行修改，請先點選「儲存」按鈕確認內容後，才能點選「確認正確」。', 'error');
@@ -363,25 +372,16 @@ const firebaseConfig = {
 
         window.exportToExcel = () => {
             const exportData = [];
-            
-            // 處理原始名單中的資料
             rawData.forEach(item => {
                 const action = userActions[item._rowId];
                 let final = item, st = '未處理';
-                
                 if (action) {
-                    if (action.status === 'deleted') {
-                        st = '已刪除';
-                    } else {
+                    if (action.status === 'deleted') { st = '已刪除'; } 
+                    else {
                         final = action.data;
-                        // 判斷是否為「已修改」：如果狀態是 modified，或者目前資料與原始資料字串不符，則顯示已修改
                         const isModified = (action.status === 'modified' || (action.original && JSON.stringify(action.data) !== JSON.stringify(action.original)));
-                        
-                        if (action.status === 'confirmed') {
-                            st = isModified ? '已修改' : '已確認';
-                        } else {
-                            st = isModified ? '已修改' : '查核中';
-                        }
+                        if (action.status === 'confirmed') { st = isModified ? '已修改' : '已確認'; } 
+                        else { st = isModified ? '已修改' : '查核中'; }
                     }
                 }
                 const row = {};
@@ -390,20 +390,15 @@ const firebaseConfig = {
                 row["最後異動時間"] = action ? action.timestamp : "";
                 exportData.push(row);
             });
-
-            // 處理全新新增的聯絡人
             Object.keys(userActions).filter(id => id.startsWith('new-')).forEach(id => {
                 const a = userActions[id];
                 if (a.status === 'deleted') return;
                 const row = {};
                 fieldOrder.forEach(k => row[k] = a.data[k] !== undefined ? a.data[k] : "");
-                
-                // 新增的聯絡人匯出時標註為 全新新增 或 新增(已確認)
                 row["處理狀態"] = a.status === 'confirmed' ? "新增(已確認)" : "全新新增"; 
                 row["最後異動時間"] = a.timestamp;
                 exportData.push(row);
             });
-
             const ws = XLSX.utils.json_to_sheet(exportData);
             const wb = XLSX.utils.book_new();
             XLSX.utils.book_append_sheet(wb, ws, "查核結果");
@@ -460,7 +455,6 @@ const firebaseConfig = {
             const tbody = document.getElementById('admin-status-table');
             if(!tbody) return; 
             tbody.innerHTML = '';
-            
             const groupsMap = {};
             rawData.forEach(item => {
                 const tid = String(findTaxId(item));
@@ -478,14 +472,12 @@ const firebaseConfig = {
                 groupsMap[tid].count++; 
                 if(a.status === 'confirmed') groupsMap[tid].completed++;
             });
-
             const filteredData = Object.values(groupsMap).filter(g => {
                 const isDone = g.completed === g.count && g.count > 0;
                 if (window.currentAdminFilter === 'done') return isDone;
                 if (window.currentAdminFilter === 'pending') return !isDone;
                 return true;
             });
-
             filteredData.sort((a,b)=>a.taxId.localeCompare(b.taxId)).forEach(g => {
                 const tr = document.createElement('tr');
                 let isDone = g.completed === g.count && g.count > 0;
@@ -544,7 +536,6 @@ const firebaseConfig = {
     </nav>
 
     <main class="max-w-6xl mx-auto px-4 py-10">
-        <!-- 使用者介面 -->
         <div id="section-user">
             <div class="bg-white rounded-2xl shadow-lg p-10 mb-8 text-center border border-orange-100">
                 <h2 class="text-xl font-bold mb-6 text-stone-600">請輸入公司統一編號開始查核</h2>
@@ -562,7 +553,6 @@ const firebaseConfig = {
             </div>
         </div>
 
-        <!-- 管理登入 -->
         <div id="section-admin-login" class="hidden max-w-sm mx-auto mt-20 p-10 bg-white rounded-3xl shadow-2xl border border-orange-50">
             <div class="text-center mb-8">
                 <div class="inline-block p-4 bg-orange-100 rounded-2xl mb-4 text-3xl">🔑</div>
@@ -573,7 +563,6 @@ const firebaseConfig = {
             <button onclick="attemptLogin()" class="w-full bg-stone-800 text-white py-4 rounded-xl font-bold hover:bg-stone-900 transition-all shadow-lg">進入管理系統</button>
         </div>
 
-        <!-- 後台介面 -->
         <div id="section-admin" class="hidden">
             <div class="flex flex-col lg:flex-row gap-8">
                 <aside class="lg:w-1/4 space-y-6">
@@ -657,4 +646,3 @@ const firebaseConfig = {
     </div>
 </body>
 </html>
-
