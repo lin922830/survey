@@ -272,6 +272,37 @@
                 `;
                 formContainer.appendChild(div);
             });
+
+            // --- 滾動到底部才顯示按鈕的防呆邏輯 ---
+            const actionBtns = document.getElementById('add-contact-action-btns');
+            const scrollHint = document.getElementById('add-contact-scroll-hint');
+            
+            // 初始化狀態：隱藏按鈕、顯示提示
+            actionBtns.classList.add('hidden', 'opacity-0');
+            actionBtns.classList.remove('opacity-100');
+            if (scrollHint) scrollHint.classList.remove('hidden');
+
+            // 確保 DOM 繪製完成後再計算高度
+            setTimeout(() => {
+                const checkScroll = () => {
+                    // 判斷是否滾動到底部 (10px 作為容差值)
+                    if (formContainer.scrollHeight - formContainer.scrollTop <= formContainer.clientHeight + 10) {
+                        actionBtns.classList.remove('hidden');
+                        // 稍加延遲觸發 Tailwind 的漸顯動畫
+                        setTimeout(() => actionBtns.classList.add('opacity-100'), 10);
+                        if (scrollHint) scrollHint.classList.add('hidden');
+                        formContainer.onscroll = null; // 達到條件後移除監聽，節省效能
+                    }
+                };
+
+                // 若視窗夠大、欄位很少，不需要滾動即可看完，則直接顯示
+                if (formContainer.scrollHeight <= formContainer.clientHeight + 10) {
+                    checkScroll(); 
+                } else {
+                    formContainer.onscroll = checkScroll; // 否則綁定滾動偵測
+                }
+            }, 100);
+
             modal.classList.remove('hidden');
         };
 
@@ -359,7 +390,7 @@
             const otherSupervisor = role === 'other';
 
             if (!role) {
-                window.showModal('人員類別未設定', '每個聯絡人請選擇一個身分類別設定（三選一）。', 'error');
+                window.showModal('人員類別未設定', '每個聯絡人請選擇一個人員類別（三選一）。', 'error');
                 return;
             }
 
@@ -395,7 +426,7 @@
             const allConfirmed = allContactIds.every(id => userActions[id]?.status === 'confirmed');
 
             if (!allConfirmed) {
-                window.showModal('提示', '請先確保所有聯絡人均已點選「確認正確」（且已勾選對應的人員類別設定）。', 'error');
+                window.showModal('提示', '請先確保所有聯絡人均已點選「確認正確」（且已勾選對應的人員類別）。', 'error');
                 return;
             }
 
@@ -409,11 +440,11 @@
             });
 
             if (!hasContactWindow || !hasSupervisor) {
-                window.showModal('人員類別設定不完整', '送出前請確保該公司至少指派了一位「訓練聯絡窗口」以及一位「訓練負責主管」。', 'error');
+                window.showModal('類別不完整', '送出前請確保該公司至少指派了一位「訓練聯絡窗口」以及一位「訓練負責主管」。', 'error');
                 return;
             }
 
-            window.showModal('已完成', '感謝您的確認，資料已即時存入雲端並更新查核進度。', 'success');
+            window.showModal('已完成，可關閉本頁', '感謝您的確認，資料已即時存入雲端並更新查核進度。', 'success');
         };
 
         window.startEditRow = (rowId) => {
@@ -713,13 +744,20 @@
     </div>
     
     <div id="add-contact-modal" class="fixed inset-0 bg-stone-900/40 z-[101] hidden flex items-center justify-center p-4 backdrop-blur-md">
-        <div class="bg-white rounded-3xl max-md w-full p-8 flex flex-col max-h-[85vh] shadow-2xl">
-            <div class="flex justify-between items-center mb-6">
+        <div class="bg-white rounded-3xl max-w-md w-full p-8 flex flex-col max-h-[85vh] shadow-2xl">
+            <div class="flex justify-between items-center mb-6 shrink-0">
                 <h3 class="font-bold text-2xl text-stone-700">新增聯絡窗口</h3>
                 <button onclick="closeAddModal()" class="text-stone-300 hover:text-stone-600 text-2xl">&times;</button>
             </div>
             <div id="add-contact-form-container" class="overflow-y-auto flex-1 pr-3"></div>
-            <div class="grid grid-cols-2 gap-4 mt-8">
+            
+            <!-- 新增：滾動提示文字 -->
+            <div id="add-contact-scroll-hint" class="text-center text-sm font-bold text-orange-500 mt-4 shrink-0 animate-pulse">
+                👇 請向下捲動以填寫所有欄位 👇
+            </div>
+
+            <!-- 修改：加入 id 以及漸顯相關 class，預設 hidden -->
+            <div id="add-contact-action-btns" class="grid grid-cols-2 gap-4 mt-6 shrink-0 hidden opacity-0 transition-opacity duration-500">
                 <button onclick="closeAddModal()" class="py-3 border-2 border-stone-100 rounded-2xl font-bold text-stone-400 hover:bg-stone-50 transition-all">取消</button>
                 <button onclick="submitNewContact()" class="py-3 bg-orange-500 text-white rounded-2xl font-bold shadow-lg shadow-orange-100 hover:bg-orange-600 transition-all">確認儲存</button>
             </div>
