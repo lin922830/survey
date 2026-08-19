@@ -214,8 +214,8 @@
                     <!-- 新增：訓練角色勾選區 -->
                     <div class="px-5 py-3 bg-orange-50/20 border-t border-orange-100 flex flex-wrap items-center gap-6 text-sm">
                         <div class="w-full mb-1">
-                            <span class="font-bold text-stone-600">指定訓練身分設定：</span>
-                            <span class="text-xs text-stone-500 ml-2">※ 選取為「訓練聯絡窗口與訓練負責主管者，為教育訓練相關資訊郵件收件對象。</span>
+                            <span class="font-bold text-stone-600">人員類別設定：</span>
+                            <span class="text-xs text-stone-500 ml-2">※ 選取為「訓練聯絡窗口」與「訓練負責主管」者，為教育訓練相關資訊郵件收件對象。</span>
                         </div>
                         <label class="flex items-center gap-2 cursor-pointer hover:text-orange-600">
                             <input type="radio" name="role-${rowId}" value="contact" onchange="window.handleRoleChange('${rowId}')" ${isTrainingContactChecked ? 'checked' : ''} class="w-4 h-4 accent-orange-500 cursor-pointer">
@@ -227,7 +227,7 @@
                         </label>
                         <label class="flex items-center gap-2 cursor-pointer hover:text-orange-600">
                             <input type="radio" name="role-${rowId}" value="other" onchange="window.handleRoleChange('${rowId}')" ${isOtherSupervisorChecked ? 'checked' : ''} class="w-4 h-4 accent-orange-500 cursor-pointer">
-                            <span class="font-medium">其他主管</span>
+                            <span class="font-medium">其他主管或人員</span>
                         </label>
                     </div>
                     <div class="p-4 bg-orange-50/30 flex justify-between items-center border-t border-orange-100">
@@ -359,7 +359,7 @@
             const otherSupervisor = role === 'other';
 
             if (!role) {
-                window.showModal('身分未設定', '每個聯絡人請選擇一個身分設定別（三選一）。', 'error');
+                window.showModal('人員類別未設定', '每個聯絡人請選擇一個身分類別設定（三選一）。', 'error');
                 return;
             }
 
@@ -395,7 +395,7 @@
             const allConfirmed = allContactIds.every(id => userActions[id]?.status === 'confirmed');
 
             if (!allConfirmed) {
-                window.showModal('提示', '請先確保所有聯絡人均已點選「確認正確」（且已勾選對應的訓練角色）。', 'error');
+                window.showModal('提示', '請先確保所有聯絡人均已點選「確認正確」（且已勾選對應的人員類別設定）。', 'error');
                 return;
             }
 
@@ -409,7 +409,7 @@
             });
 
             if (!hasContactWindow || !hasSupervisor) {
-                window.showModal('角色配置不完整', '送出前請確保該公司至少指派了一位「訓練聯絡窗口」以及一位「訓練負責主管」。', 'error');
+                window.showModal('人員類別設定不完整', '送出前請確保該公司至少指派了一位「訓練聯絡窗口」以及一位「訓練負責主管」。', 'error');
                 return;
             }
 
