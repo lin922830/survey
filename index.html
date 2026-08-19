@@ -30,7 +30,7 @@
         let userActions = {};
         let fieldOrder = []; 
         let currentUser = null;
-        let adminCreds = { user: "admin", pass: "8888" }; 
+        let adminCreds = { user: "admin", pass: "8406" }; 
         let pendingDeleteId = null;
         let db, auth, appId;
 
@@ -42,7 +42,7 @@
                 const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : myFirebaseConfig;
                 
                 // 修正處：根據您的 Firebase 實際路徑調整 appId
-                appId = typeof __app_id !== 'undefined' ? __app_id : "survey-system-v1"; 
+                appId = typeof __app_id !== 'undefined' ? __app_id : "survey-system-6d0ec"; 
 
                 if (!firebaseConfig.apiKey) {
                     console.error("Firebase 未配置");
@@ -181,6 +181,11 @@
                 
                 const displayKeys = [...new Set([...fieldOrder, ...Object.keys(currentData)])].filter(k => !k.startsWith('_') && k !== 'undefined' && k !== '最後異動時間' && k !== '處理狀態');
                 
+                // 檢查是否勾選了指定訓練身分
+                const isTrainingContactChecked = action?.trainingContact === true;
+                const isTrainingSupervisorChecked = action?.trainingSupervisor === true;
+                const isOtherSupervisorChecked = action?.otherSupervisor === true;
+
                 const card = document.createElement('div');
                 card.className = `${cClass} rounded-2xl shadow-sm border-2 border-orange-100 overflow-hidden mb-6 transition-all`;
                 card.innerHTML = `
@@ -205,6 +210,25 @@
                                 `).join('')}
                             </tbody>
                         </table>
+                    </div>
+                    <!-- 新增：訓練角色勾選區 -->
+                    <div class="px-5 py-3 bg-orange-50/20 border-t border-orange-100 flex flex-wrap items-center gap-6 text-sm">
+                        <div class="w-full mb-1">
+                            <span class="font-bold text-stone-600">指定訓練身分設定：</span>
+                            <span class="text-xs text-stone-500 ml-2">※ 選取為「訓練聯絡窗口與訓練負責主管者，為教育訓練相關資訊郵件收件對象。</span>
+                        </div>
+                        <label class="flex items-center gap-2 cursor-pointer hover:text-orange-600">
+                            <input type="radio" name="role-${rowId}" value="contact" onchange="window.handleRoleChange('${rowId}')" ${isTrainingContactChecked ? 'checked' : ''} class="w-4 h-4 accent-orange-500 cursor-pointer">
+                            <span class="font-medium">訓練聯絡窗口</span>
+                        </label>
+                        <label class="flex items-center gap-2 cursor-pointer hover:text-orange-600">
+                            <input type="radio" name="role-${rowId}" value="supervisor" onchange="window.handleRoleChange('${rowId}')" ${isTrainingSupervisorChecked ? 'checked' : ''} class="w-4 h-4 accent-orange-500 cursor-pointer">
+                            <span class="font-medium">訓練負責主管</span>
+                        </label>
+                        <label class="flex items-center gap-2 cursor-pointer hover:text-orange-600">
+                            <input type="radio" name="role-${rowId}" value="other" onchange="window.handleRoleChange('${rowId}')" ${isOtherSupervisorChecked ? 'checked' : ''} class="w-4 h-4 accent-orange-500 cursor-pointer">
+                            <span class="font-medium">其他主管</span>
+                        </label>
                     </div>
                     <div class="p-4 bg-orange-50/30 flex justify-between items-center border-t border-orange-100">
                         <button onclick="window.requestDelete('${rowId}')" class="px-3 py-2 text-red-500 hover:bg-red-50 rounded-lg text-base font-bold">刪除</button>
@@ -263,6 +287,24 @@
             document.getElementById('add-contact-modal').classList.add('hidden');
         };
 
+        window.handleRoleChange = async (rowId) => {
+            if (!currentUser) return;
+            const action = userActions[rowId];
+            
+            // 只有在狀態已經是「已確認」的情況下，更改身分才會立刻取消確認狀態
+            if (action && action.status === 'confirmed') {
+                const role = document.querySelector(`input[name="role-${rowId}"]:checked`)?.value;
+                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'user_actions', rowId), {
+                    ...action,
+                    status: 'modified',
+                    trainingContact: role === 'contact',
+                    trainingSupervisor: role === 'supervisor',
+                    otherSupervisor: role === 'other',
+                    timestamp: new Date().toLocaleString()
+                });
+            }
+        };
+
         window.saveRow = async (rowId) => {
             if (!currentUser) return;
             const action = userActions[rowId];
@@ -276,10 +318,18 @@
                 newData[key] = input.value; 
             });
             
+            const role = document.querySelector(`input[name="role-${rowId}"]:checked`)?.value;
+            const trainingContact = role === 'contact';
+            const trainingSupervisor = role === 'supervisor';
+            const otherSupervisor = role === 'other';
+
             await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'user_actions', rowId), {
                 status: (rowId.startsWith('new-') ? 'new' : 'modified'), 
                 data: newData, 
                 original: original, 
+                trainingContact: trainingContact,
+                trainingSupervisor: trainingSupervisor,
+                otherSupervisor: otherSupervisor,
                 timestamp: new Date().toLocaleString()
             });
             
@@ -302,12 +352,29 @@
                 return;
             }
 
+            // 取得目前的勾選狀態
+            const role = document.querySelector(`input[name="role-${rowId}"]:checked`)?.value;
+            const trainingContact = role === 'contact';
+            const trainingSupervisor = role === 'supervisor';
+            const otherSupervisor = role === 'other';
+
+            if (!role) {
+                window.showModal('身分未設定', '每個聯絡人請選擇一個身分設定別（三選一）。', 'error');
+                return;
+            }
+
             const item = rawData.find(r => r._rowId === rowId);
             const current = userActions[rowId]?.data || item || {};
             const original = item || userActions[rowId]?.original || {};
             
             await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'user_actions', rowId), {
-                status: 'confirmed', data: current, original: original, timestamp: new Date().toLocaleString()
+                status: 'confirmed', 
+                data: current, 
+                original: original, 
+                trainingContact: trainingContact,
+                trainingSupervisor: trainingSupervisor,
+                otherSupervisor: otherSupervisor,
+                timestamp: new Date().toLocaleString()
             });
         };
 
@@ -323,10 +390,26 @@
                 });
 
             const allContactIds = [...matches.map(m => m._rowId), ...newContacts];
+            
+            // 檢查是否每個聯絡人皆已確認
             const allConfirmed = allContactIds.every(id => userActions[id]?.status === 'confirmed');
 
             if (!allConfirmed) {
-                window.showModal('提示', '請先確保所有聯絡人均已點選「確認正確」。若有修改內容，請記得先按「儲存」再按「確認」。', 'error');
+                window.showModal('提示', '請先確保所有聯絡人均已點選「確認正確」（且已勾選對應的訓練角色）。', 'error');
+                return;
+            }
+
+            // 額外檢查：整個統編底下，是否至少有一個「訓練聯絡窗口」以及一個「訓練負責主管」被勾選
+            let hasContactWindow = false;
+            let hasSupervisor = false;
+            allContactIds.forEach(id => {
+                const act = userActions[id];
+                if (act?.trainingContact) hasContactWindow = true;
+                if (act?.trainingSupervisor) hasSupervisor = true;
+            });
+
+            if (!hasContactWindow || !hasSupervisor) {
+                window.showModal('角色配置不完整', '送出前請確保該公司至少指派了一位「訓練聯絡窗口」以及一位「訓練負責主管」。', 'error');
                 return;
             }
 
@@ -375,6 +458,9 @@
             rawData.forEach(item => {
                 const action = userActions[item._rowId];
                 let final = item, st = '未處理';
+                let tContact = action?.trainingContact ? '是' : '否';
+                let tSupervisor = action?.trainingSupervisor ? '是' : '否';
+                let oSupervisor = action?.otherSupervisor ? '是' : '否';
                 if (action) {
                     if (action.status === 'deleted') { st = '已刪除'; } 
                     else {
@@ -386,6 +472,9 @@
                 }
                 const row = {};
                 fieldOrder.forEach(k => row[k] = final[k] !== undefined ? final[k] : "");
+                row["訓練聯絡窗口"] = tContact;
+                row["訓練負責主管"] = tSupervisor;
+                row["其他主管"] = oSupervisor;
                 row["處理狀態"] = st; 
                 row["最後異動時間"] = action ? action.timestamp : "";
                 exportData.push(row);
@@ -395,6 +484,9 @@
                 if (a.status === 'deleted') return;
                 const row = {};
                 fieldOrder.forEach(k => row[k] = a.data[k] !== undefined ? a.data[k] : "");
+                row["訓練聯絡窗口"] = a.trainingContact ? '是' : '否';
+                row["訓練負責主管"] = a.trainingSupervisor ? '是' : '否';
+                row["其他主管"] = a.otherSupervisor ? '是' : '否';
                 row["處理狀態"] = a.status === 'confirmed' ? "新增(已確認)" : "全新新增"; 
                 row["最後異動時間"] = a.timestamp;
                 exportData.push(row);
@@ -646,5 +738,3 @@
     </div>
 </body>
 </html>
-
-
